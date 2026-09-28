@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+  <link rel="icon" href="data:image/svg+xml,
+  <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>
+    <text y='0.9em' font-size='90'>🔍</text>
+  </svg>">
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>サイト内検索ツール</title>
+<style>
+  :root{--gap:8px;--muted:#666;--primary:#0b69ff}
+  body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; margin:18px; color:#222}
+  h1{margin:0 0 12px 0}
+  .row{display:flex;gap:var(--gap);align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  .form-controls{display:flex;gap:var(--gap);align-items:center;flex-wrap:wrap;width:100%}
+  input[type="text"], input[type="url"], select, textarea{padding:8px;border:1px solid #ccc;border-radius:6px;min-width:140px}
+  button{padding:8px 10px;border-radius:6px;border:1px solid #888;background:#f6f6f6;cursor:pointer}
+  button.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+  #workspace{display:flex;gap:16px}
+  #left{flex:1}
+  #sites{margin-top:12px;border-top:1px dashed #ddd;padding-top:12px}
+  .folder{border:1px solid #eee;border-radius:8px;padding:8px;margin-bottom:8px;background:#fff}
+  .folder-header{display:flex;align-items:center;gap:8px}
+  .folder-title{font-weight:600;flex:1;cursor:pointer}
+  .folder-items{margin-top:8px;padding-left:6px}
+  .site-item{display:flex;gap:8px;align-items:center;padding:6px;border-radius:6px;border:1px solid #f0f0f0;margin-bottom:6px;background:#fafafa}
+  .site-name{flex:1;cursor:pointer}
+  .url{font-size:0.85em;color:var(--muted);min-width:160px}
+  .log{background:#f7f7f7;padding:8px;border-radius:6px;height:160px;overflow:auto;white-space:pre-wrap}
+  .error{color:#b00;margin-top:6px}
+  .controls{display:flex;gap:6px}
+  .drop-target{outline:2px dashed #0b69ff;outline-offset:4px}
+  .badge{padding:6px;border-radius:6px;border:1px solid #eee;background:#fff}
+</style>
+</head>
+<body>
+  <h1>サイト内検索ツール（暫定）</h1>
+
+  <div class="row">
+    <div class="form-controls" style="flex:1">
+      <input id="query" type="text" placeholder="検索ワード" autofocus>
+      <select id="engine" title="検索エンジン">
+        <option value="google">Google</option>
+        <option value="yahoo">Yahoo</option>
+<!--        <option value="bing">Bing</option> -->
+        <option value="ddg">DuckDuckGo</option>
+      </select>
+      <button id="searchAll" class="primary" visibility: hidden>すべてで検索</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button id="addFolder">フォルダ追加</button>
+      <button id="exportBtn">エクスポート</button>
+      <button id="importBtn">インポート</button>
+      <div id="savedEngineBadge" class="badge">既定エンジン: —</div>
+    </div>
+  </div>
+
+  <div style="border:1px solid #eee;padding:12px;border-radius:8px;margin-bottom:12px">
+    <div class="form-controls">
+      <input id="siteName" type="text" placeholder="サイト名">
+      <input id="siteUrl" type="url" placeholder="サイトURL">
+      <select id="addFolderSelect" title="追加先フォルダ"></select>
+      <div style="display:flex;gap:6px">
+        <button id="addSite">追加</button>
+        <button id="clearAll" visibility: hidden>全削除</button>
+      </div>
+    </div>
+    <div style="margin-top:8px;color:var(--muted)">追加したサイト名をダブルクリックで検索できます。</div>
+  </div>
+
+  <div id="workspace">
+    <div id="left" style="min-width:420px">
+      <div id="sites"></div>
+    </div>
+    <div style="width:360px">
+      <h3>状態ログ</h3>
+      <div class="log" id="logArea">初期状態: ログはここに表示されます。</div>
+      <div class="error" id="errArea"></div>
+      <h3 style="margin-top:12px">インポート / エクスポート</h3>
+      <textarea id="ioArea" placeholder='ここにJSONを貼り付けて「インポート」を押してください。'></textarea>
+    </div>
+  </div>
+
+<script>
+(function(){
+  'use strict';
+  var STORAGE_KEY = 'siteSearch_paths_v1';
+  var ENGINE_KEY  = 'siteSearch_defaultEngine_v1';
+
+  var logArea = document.getElementById('logArea');
+  var errArea = document.getElementById('errArea');
+  var savedEngineBadge = document.getElementById('savedEngineBadge');
+  var sitesEl = document.getElementById('sites');
+  var addFolderSelect = document.getElementById('addFolderSelect');
+
+  function log(){ var args = Array.prototype.slice.call(arguments); console.log.apply(console,args); if(logArea){ logArea.textContent += '\\n' + args.map(function(a){ return (typeof a==='object'?JSON.stringify(a):String(a)); }).join(' '); logArea.scrollTop = logArea.scrollHeight; } }
+  function setError(msg){ if(errArea) errArea.textContent = msg; log('ERROR:', msg); }
+
+  function genId(prefix){ return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8); }
+
+  function migrateIfNeeded(){
+    try{
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if(!raw) return;
+      var parsed = JSON.parse(raw);
+      if(Array.isArray(parsed) && parsed.length > 0 && (!parsed[0].type && !parsed[0].items)){
+        var folder = { type:'folder', id: genId('f'), name: '未分類', items: [] };
+        parsed.forEach(function(it){ if(it && it.url) folder.items.push({ type:'site', id: genId('s'), name: it.name || it.url, url: it.url }); });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify([folder]));
+        log('migration: converted simple list to folder structure');
+      }
+    }catch(e){ setError('migration error: ' + (e && e.message ? e.message : String(e))); }
+  }
+
+  function loadData(){ try{ var raw = localStorage.getItem(STORAGE_KEY); if(!raw) return []; var parsed = JSON.parse(raw); if(!Array.isArray(parsed)) return []; return parsed; }catch(e){ setError('load error: ' + e.message); return []; } }
+  function saveData(data){ try{ try{ localStorage.setItem(STORAGE_KEY + '_backup_' + Date.now(), localStorage.getItem(STORAGE_KEY) || '[]'); }catch(e){} localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); log('saved'); refreshFolderSelect(); }catch(e){ setError('save error: ' + e.message); } }
+
+  function loadDefaultEngine(){ try{ return localStorage.getItem(ENGINE_KEY) || 'google'; }catch(e){ return 'google'; } }
+  function saveDefaultEngine(v){ try{ localStorage.setItem(ENGINE_KEY, v); updateSavedEngineBadge(v); }catch(e){} }
+  function updateSavedEngineBadge(v){ if(savedEngineBadge) savedEngineBadge.textContent = '既定エンジン: ' + (v || 'google'); }
+
+  function buildSearchUrl(engine, query){ var q = encodeURIComponent(query); if(engine === 'yahoo') return 'https://search.yahoo.co.jp/search?p=' + q; if(engine === 'bing') return 'https://www.bing.com/search?q=' + q; if(engine === 'ddg') return 'https://duckduckgo.com/?q=' + q; return 'https://www.google.com/search?q=' + q; }
+  function buildSiteQuery(rawUrl){ if(!rawUrl) return ''; try{ var withScheme = (rawUrl.indexOf('://') !== -1) ? rawUrl : 'https://' + rawUrl; var u = new URL(withScheme); return u.hostname + (u.pathname||'') + (u.search||'') + (u.hash||''); }catch(e){ return rawUrl; } }
+
+  function computeInsertIndex(container, clientY){
+    var children = Array.from(container.querySelectorAll('.site-item'));
+    if(children.length === 0) return 0;
+    for(var i=0;i<children.length;i++){
+      var rect = children[i].getBoundingClientRect();
+      if(clientY < rect.top + rect.height/2) return i;
+    }
+    return children.length;
+  }
+
+  // renderSites: builds DOM and attaches drag/drop handlers that use window.handleDrop
+  window.renderSites = function(){
+    try{
+      var data = loadData();
+      sitesEl.innerHTML = '';
+      if(!data || data.length === 0){
+        var d = document.createElement('div'); d.style.color = '#666'; d.textContent = 'サイトが登録されていません。'; sitesEl.appendChild(d); refreshFolderSelect(); return;
+      }
+
+      var folderContainer = document.createElement('div'); folderContainer.style.display = 'flex'; folderContainer.style.flexDirection = 'column';
+
+      data.forEach(function(folder, folderIndex){
+        if(folder.type !== 'folder') return;
+        var f = document.createElement('div'); f.className = 'folder'; f.dataset.folderId = folder.id;
+        f.draggable = false;
+
+        var header = document.createElement('div'); header.className = 'folder-header';
+        var title = document.createElement('div'); title.className = 'folder-title'; title.textContent = folder.name || 'フォルダ';
+        title.addEventListener('click', function(){
+          var items = f.querySelector('.folder-items');
+          if(!items) return;
+        
+          var isOpen = items.style.display === 'none';
+          items.style.display = isOpen ? '' : 'none';
+        
+          // ★ 状態を保存
+          var data = loadData();
+          var fobj = data.find(x => x.id === folder.id);
+          if(fobj){
+            fobj.open = isOpen;
+            saveData(data);
+          }
+        });
+
+        // folder drag/drop for reordering
+        f.addEventListener('dragstart', function(e){ e.dataTransfer.setData('text/plain', JSON.stringify({ type:'folder', id: folder.id, srcIndex: folderIndex })); f.classList.add('dragging'); });
+        f.addEventListener('dragend', function(){ f.classList.remove('dragging'); });
+        f.addEventListener('dragover', function(e){ e.preventDefault(); f.classList.add('drop-target'); });
+        f.addEventListener('dragleave', function(){ f.classList.remove('drop-target'); });
+        f.addEventListener('drop', function(e){
+          e.preventDefault(); f.classList.remove('drop-target');
+          var payload = e.dataTransfer.getData('text/plain'); if(!payload) return;
+          try{ var obj = JSON.parse(payload); if(obj.type === 'folder'){ window.handleDrop(obj, folder.id, null); } else if(obj.type === 'site'){ var items = f.querySelector('.folder-items'); var idx = computeInsertIndex(items, e.clientY); window.handleDrop(obj, folder.id, idx); } }catch(err){ console.error(err); }
+        });
+
+        var controls = document.createElement('div'); controls.className = 'folder-actions';
+        var renameBtn = document.createElement('button'); renameBtn.textContent = '名前変更';
+        renameBtn.addEventListener('click', function(){ var v = prompt('フォルダ名を入力してください', folder.name); if(v === null) return; var data = loadData(); var fobj = data.find(function(x){ return x.id === folder.id; }); if(fobj){ fobj.name = v.trim() || fobj.name; saveData(data); renderSites(); } });
+        var delBtn = document.createElement('button'); delBtn.textContent = '削除';
+        delBtn.addEventListener('click', function(){ if(!confirm('フォルダを削除しますか？ フォルダ内のサイトは未分類フォルダへ移動します。')) return; var data = loadData(); var defaultFolder = data.find(function(x){ return x.type==='folder' && x.name==='未分類'; }); if(!defaultFolder){ defaultFolder = { type:'folder', id: genId('f'), name:'未分類', items:[] }; data.push(defaultFolder); } var idx = data.findIndex(function(x){ return x.id === folder.id; }); if(idx === -1) return; (data[idx].items || []).forEach(function(it){ defaultFolder.items.push(it); }); data.splice(idx,1); saveData(data); renderSites(); });
+        controls.appendChild(renameBtn); controls.appendChild(delBtn);
+
+        header.appendChild(title); header.appendChild(controls);
+        f.appendChild(header);
+
+        var items = document.createElement('div'); items.className = 'folder-items'; items.dataset.folderId = folder.id;
+
+        // ★ フォルダの開閉状態を反映
+        items.style.display = folder.open ? '' : 'none';
+
+        items.addEventListener('dragover', function(e){ e.preventDefault(); items.classList.add('drop-target'); });
+        items.addEventListener('dragleave', function(e){ items.classList.remove('drop-target'); });
+        items.addEventListener('drop', function(e){ e.preventDefault(); items.classList.remove('drop-target'); var payload = e.dataTransfer.getData('text/plain'); if(!payload) return; try{ var obj = JSON.parse(payload); var insertIndex = computeInsertIndex(items, e.clientY); window.handleDrop(obj, folder.id, insertIndex); }catch(err){ console.error(err); } });
+
+        (folder.items || []).forEach(function(site, siteIndex){
+          var si = document.createElement('div'); si.className = 'site-item'; si.draggable = false; si.dataset.siteId = site.id;
+          si.addEventListener('dragstart', function(e){
+            var folderEl = si.closest('.folder'); var srcFolderId = folderEl ? folderEl.dataset.folderId : null;
+            // compute current index by DOM to be robust
+            var idx = Array.prototype.indexOf.call(si.parentNode.children, si);
+            var payload = { type:'site', id: site.id, srcFolderId: srcFolderId, srcIndex: idx };
+            try{ e.dataTransfer.setData('text/plain', JSON.stringify(payload)); }catch(err){ console.error('setData err', err); }
+            // small visual
+            try{ e.dataTransfer.setDragImage(si, 10, 10); }catch(e){}
+          });
+
+          var name = document.createElement('div'); name.className = 'site-name'; 
+          // 表示は日本語に戻す（decodeURI）
+          name.textContent = site.name || decodeURI(site.url);
+
+          name.addEventListener('dblclick', function(){ var q = document.getElementById('query').value.trim(); if(!q){ alert('検索ワードを入力してください'); return; } var engine = document.getElementById('engine').value || loadDefaultEngine(); var siteQuery = buildSiteQuery(site.url); var full = q + ' site:' + siteQuery; var url = buildSearchUrl(engine, full); window.open(url, '_blank'); });
+
+          var urlSpan = document.createElement('div'); urlSpan.className = 'url'; urlSpan.textContent = site.url;
+          var btns = document.createElement('div'); btns.className = 'controls';
+          var edit = document.createElement('button'); edit.textContent = '編集';
+          edit.addEventListener('click', function(){ var newName = prompt('サイト名', site.name); if(newName === null) return; var newUrl = prompt('サイトURL', site.url); if(newUrl === null) return; var data = loadData(); var fobj = data.find(function(fx){ return fx.id === folder.id; }); if(fobj){ var s = fobj.items.find(function(it){ return it.id === site.id; }); if(s){ s.name = newName.trim() || s.name; s.url = newUrl.trim() || s.url; saveData(data); renderSites(); } } });
+          var del = document.createElement('button'); del.textContent = '削除';
+          del.addEventListener('click', function(){ if(!confirm('このサイトを削除しますか？')) return; var data = loadData(); var fi = data.find(function(fx){ return fx.id === folder.id; }); if(fi){ var siidx = fi.items.findIndex(function(it){ return it.id === site.id; }); if(siidx !== -1) fi.items.splice(siidx,1); saveData(data); renderSites(); } });
+          btns.appendChild(edit); btns.appendChild(del);
+
+          si.appendChild(name); si.appendChild(urlSpan); si.appendChild(btns);
+
+          // drop on item -> insert before
+          si.addEventListener('dragover', function(e){ e.preventDefault(); si.classList.add('drop-target'); });
+          si.addEventListener('dragleave', function(){ si.classList.remove('drop-target'); });
+          si.addEventListener('drop', function(e){ e.preventDefault(); si.classList.remove('drop-target'); var payload = e.dataTransfer.getData('text/plain'); if(!payload) return; try{ var obj = JSON.parse(payload); var folderEl = si.closest('.folder'); var folderId = folderEl ? folderEl.dataset.folderId : null; var insertIndex = Array.prototype.indexOf.call(si.parentNode.children, si); window.handleDrop(obj, folderId, insertIndex); }catch(err){ console.error(err); } });
+
+          items.appendChild(si);
+        });
+
+        f.appendChild(items);
+        folderContainer.appendChild(f);
+      });
+
+      sitesEl.appendChild(folderContainer);
+      refreshFolderSelect();
+    }catch(e){ setError('renderSites error: ' + (e && e.message ? e.message : String(e))); }
+  };
+
+  // handleDrop is exposed on window so any wrapper/logging can see it
+  window.handleDrop = function(obj, targetFolderId, insertIndex){
+    try{
+      var data = loadData();
+      if(obj.type === 'site'){
+        // find source folder and site by id (do not rely solely on payload indices)
+        var srcFolder = data.find(function(f){ return f.items && f.items.some(function(s){ return s.id === obj.id; }); });
+        if(!srcFolder) return;
+        var site = srcFolder.items.find(function(s){ return s.id === obj.id; });
+        if(!site) return;
+        // remove from source
+        srcFolder.items = srcFolder.items.filter(function(s){ return s.id !== obj.id; });
+        // find target folder
+        var tgt = data.find(function(f){ return f.id === targetFolderId; });
+        if(!tgt) return;
+        tgt.items = tgt.items || [];
+        // adjust insertIndex if moving within same folder and payload srcIndex < insertIndex
+        var srcIndex = (typeof obj.srcIndex === 'number') ? obj.srcIndex : -1;
+        var movingWithinSame = (srcFolder.id === tgt.id);
+        if(typeof insertIndex === 'number'){
+          var idx = insertIndex;
+          if(movingWithinSame && srcIndex !== -1 && srcIndex < idx) idx = idx - 1;
+          if(idx < 0) idx = 0;
+          if(idx > tgt.items.length) idx = tgt.items.length;
+          tgt.items.splice(idx, 0, site);
+        } else {
+          tgt.items.push(site);
+        }
+        saveData(data); renderSites();
+      } else if(obj.type === 'folder'){
+        var srcIdx = data.findIndex(function(f){ return f.id === obj.id; });
+        var tgtIdx = data.findIndex(function(f){ return f.id === targetFolderId; });
+        if(srcIdx === -1) return;
+        var folderObj = data.splice(srcIdx,1)[0];
+        if(tgtIdx === -1) data.push(folderObj);
+        else data.splice(tgtIdx,0,folderObj);
+        saveData(data); renderSites();
+      }
+    }catch(e){ console.error('handleDrop error', e); setError('ドロップ処理でエラー'); }
+  };
+
+  function refreshFolderSelect(){
+    try{
+      var data = loadData();
+      addFolderSelect.innerHTML = '';
+      if(!data || data.length === 0){ var opt = document.createElement('option'); opt.value = ''; opt.textContent = '未分類'; addFolderSelect.appendChild(opt); return; }
+      data.forEach(function(f, idx){ if(f.type !== 'folder') return; var opt = document.createElement('option'); opt.value = f.id; opt.textContent = f.name || ('フォルダ ' + (idx+1)); addFolderSelect.appendChild(opt); });
+    }catch(e){ console.error(e); }
+  }
+
+  // add site
+  (function(){
+    var addBtn = document.getElementById('addSite');
+    addBtn.addEventListener('click', function(){
+      try{
+        var name = (document.getElementById('siteName').value || '').trim();
+        var url  = (document.getElementById('siteUrl').value || '').trim();
+        var folderId = addFolderSelect.value;
+        if(!url){ alert('サイトURLを入力してください'); return; }
+        url = url.replace(/^[\s\uFEFF\u00A0]+|[\s\uFEFF\u00A0]+$/g, '');
+        var data = loadData();
+        if(!data || data.length === 0){ data = [{ type:'folder', id: genId('f'), name:'未分類', items:[] }]; }
+        var target = data.find(function(f){ return f.id === folderId; }) || data[0];
+        if(!target || target.type !== 'folder'){ data.push({ type:'folder', id: genId('f'), name:'未分類', items:[] }); target = data[data.length-1]; }
+        target.items = target.items || [];
+        target.items.push({ type:'site', id: genId('s'), name: name || url, url: url });
+
+        // ★ サイトを追加したフォルダを開いた状態にする
+        target.open = true;
+
+        // ★ 「未選択に戻る」問題を潰す
+        // 今選ばれているフォルダIDを保存
+        var currentFolderSelection = addFolderSelect.value;        
+        saveData(data);
+        renderSites();        
+        // 再描画後に選択状態を復元
+        addFolderSelect.value = currentFolderSelection;
+
+        document.getElementById('siteName').value = ''; document.getElementById('siteUrl').value = '';
+      }catch(e){ setError('addSite error: ' + (e && e.message ? e.message : String(e))); }
+    });
+  })();
+
+  document.getElementById('addFolder').addEventListener('click', function(){ var name = prompt('フォルダ名を入力してください', '新しいフォルダ'); if(name === null) return; var data = loadData(); data.push({ type:'folder', id: genId('f'), name: name.trim() || '新しいフォルダ', items: [] }); saveData(data); renderSites(); });
+  document.getElementById('clearAll').addEventListener('click', function(){ if(!confirm('すべてのデータを削除しますか？')) return; localStorage.removeItem(STORAGE_KEY); renderSites(); });
+
+  document.getElementById('searchAll').addEventListener('click', function(){ var q = document.getElementById('query').value.trim(); if(!q){ alert('検索ワードを入力してください'); return; } var data = loadData(); var engine = document.getElementById('engine').value || loadDefaultEngine(); data.forEach(function(folder){ (folder.items||[]).forEach(function(site){ var siteQuery = buildSiteQuery(site.url); var full = q + ' site:' + siteQuery; var url = buildSearchUrl(engine, full); window.open(url, '_blank'); }); }); });
+
+  var engineEl = document.getElementById('engine'); engineEl.addEventListener('change', function(){ saveDefaultEngine(engineEl.value); });
+  try{ var eng = loadDefaultEngine(); engineEl.value = eng; updateSavedEngineBadge(eng); }catch(e){}
+
+  document.getElementById('exportBtn').addEventListener('click', function(){ var data = loadData(); document.getElementById('ioArea').value = JSON.stringify(data, null, 2); alert('JSONをテキストエリアに出力しました。コピーして保存してください。'); });
+  document.getElementById('importBtn').addEventListener('click', function(){ var txt = document.getElementById('ioArea').value.trim(); if(!txt){ alert('インポートするJSONをテキストエリアに貼り付けてください'); return; } try{ var parsed = JSON.parse(txt); if(!Array.isArray(parsed)) throw new Error('配列ではありません'); var ok = parsed.every(function(it){ return it && (it.type === 'folder' && Array.isArray(it.items)); }); if(!ok) throw new Error('フォルダ構造の配列である必要があります'); saveData(parsed); renderSites(); alert('インポート完了'); }catch(e){ setError('インポート失敗: ' + (e && e.message ? e.message : String(e))); alert('インポートに失敗しました: ' + (e && e.message ? e.message : String(e))); } });
+
+  document.getElementById('query').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); document.getElementById('searchAll').click(); } });
+
+  try{ migrateIfNeeded(); renderSites(); log('initialized'); }catch(e){ setError('init error: ' + (e && e.message ? e.message : String(e))); }
+
+  window.addEventListener('error', function(e){ setError('Error: ' + (e.message || e.toString())); });
+  window.addEventListener('unhandledrejection', function(e){ setError('UnhandledRejection: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason))); });
+
+  // debug helpers
+  window.__siteSearch = { loadData: loadData, saveData: saveData, renderSites: renderSites, handleDrop: window.handleDrop };
+
+})();
+</script>
+</body>
+</html>
